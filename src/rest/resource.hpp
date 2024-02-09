@@ -34,6 +34,10 @@
 #ifndef OTBR_REST_RESOURCE_HPP_
 #define OTBR_REST_RESOURCE_HPP_
 
+/*
+Include necessary headers for OpenThread functions, REST utilities, and JSON processing.
+*/
+
 #include "openthread-br/config.h"
 
 #include <unordered_map>
@@ -45,6 +49,9 @@
 #include "ncp/ncp_openthread.hpp"
 #include "openthread/dataset.h"
 #include "openthread/dataset_ftd.h"
+#include "rest/extensions/rest_task_add_thread_device.hpp"
+#include "rest/extensions/rest_task_handler.hpp"
+#include "rest/extensions/rest_task_queue.hpp"
 #include "rest/json.hpp"
 #include "rest/request.hpp"
 #include "rest/response.hpp"
@@ -135,6 +142,8 @@ private:
     void DatasetPending(const Request &aRequest, Response &aResponse) const;
     void Diagnostic(const Request &aRequest, Response &aResponse) const;
     void HandleDiagnosticCallback(const Request &aRequest, Response &aResponse);
+    // This handler will handle all the request from 'api/action' [POST|GET|DELETE] *TODO: GET|DELETE
+    void ApiActionHandler(const Request &aRequest, Response &aResponse) const;
 
     void GetNodeInfo(Response &aResponse) const;
     void DeleteNodeInfo(Response &aResponse) const;
@@ -150,7 +159,10 @@ private:
     void GetDataRloc(Response &aResponse) const;
     void GetDataset(DatasetType aDatasetType, const Request &aRequest, Response &aResponse) const;
     void SetDataset(DatasetType aDatasetType, const Request &aRequest, Response &aResponse) const;
-
+    // RestActionPostHandler() will handle POST request recieved on 'api/actions'
+    // It will parse the recieved JSON data, validate it and update the task status for further processing
+    // Thread function "rest_task_queue_task" will process and evaluate the request.
+    void RestActionPostHandler(const Request &aRequest, Response &aResponse) const;
     void DeleteOutDatedDiagnostic(void);
     void UpdateDiag(std::string aKey, std::vector<otNetworkDiagTlv> &aDiag);
 
@@ -159,8 +171,7 @@ private:
                                           const otMessageInfo *aMessageInfo,
                                           void                *aContext);
     void        DiagnosticResponseHandler(otError aError, const otMessage *aMessage, const otMessageInfo *aMessageInfo);
-
-    otInstance           *mInstance;
+    otInstance *mInstance;
     ControllerOpenThread *mNcp;
 
     std::unordered_map<std::string, ResourceHandler>         mResourceMap;

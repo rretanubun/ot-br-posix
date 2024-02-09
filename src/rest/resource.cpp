@@ -27,8 +27,15 @@
  */
 
 #define OTBR_LOG_TAG "REST"
-
+// Include the resource.hpp header to access the Resource class definition and other required headers
 #include "rest/resource.hpp"
+#include "common/logging.hpp"
+
+extern "C" {
+#include <cJSON.h>
+extern task_node_t *task_queue;
+extern uint8_t      task_queue_len;
+}
 
 #define OT_PSKC_MAX_LENGTH 16
 #define OT_EXTENDED_PANID_LENGTH 8
@@ -50,6 +57,9 @@
 #define OT_REST_RESOURCE_PATH_NETWORK_CURRENT "/networks/current"
 #define OT_REST_RESOURCE_PATH_NETWORK_CURRENT_COMMISSION "/networks/commission"
 #define OT_REST_RESOURCE_PATH_NETWORK_CURRENT_PREFIX "/networks/current/prefix"
+
+// Endpoint path definition
+#define OT_REST_RESOURCE_PATH_API_ACTION "/api/actions"
 
 #define OT_REST_HTTP_STATUS_200 "200 OK"
 #define OT_REST_HTTP_STATUS_201 "201 Created"
@@ -121,6 +131,9 @@ static std::string GetHttpStatus(HttpStatusCode aErrorCode)
     return httpStatus;
 }
 
+/**
+ * Initialize the Resource class with a pointer to the ControllerOpenThread instance.
+ */
 Resource::Resource(ControllerOpenThread *aNcp)
     : mInstance(nullptr)
     , mNcp(aNcp)
@@ -142,6 +155,7 @@ Resource::Resource(ControllerOpenThread *aNcp)
 
     // Resource callback handler
     mResourceCallbackMap.emplace(OT_REST_RESOURCE_PATH_DIAGNOSTICS, &Resource::HandleDiagnosticCallback);
+    mResourceMap.emplace(OT_REST_RESOURCE_PATH_API_ACTION, &Resource::ApiActionHandler);
 }
 
 void Resource::Init(void)
@@ -896,6 +910,149 @@ exit:
     {
         otbrLogWarning("Failed to get diagnostic data: %s", otThreadErrorToString(aError));
     }
+}
+
+void Resource::ApiActionHandler(const Request &aRequest, Response &aResponse) const
+{
+    std::string errorCode;
+
+    switch (aRequest.GetMethod())
+    {
+    case HttpMethod::kPost:
+        RestActionPostHandler(aRequest, aResponse);
+        break;
+    case HttpMethod::kGet:
+        // RestActionGetHandler(aRequest, aResponse);
+        break;
+    case HttpMethod::kPut:
+        // RestActionDeleteHandler(aRequest, aResponse);
+        break;
+    case HttpMethod::kOptions:
+        errorCode = GetHttpStatus(HttpStatusCode::kStatusOk);
+        aResponse.SetResponsCode(errorCode);
+        aResponse.SetComplete();
+        break;
+    default:
+        ErrorHandler(aResponse, HttpStatusCode::kStatusMethodNotAllowed);
+        break;
+    }
+}
+
+void Resource::RestActionPostHandler(const Request &aRequest, Response &aResponse) const
+{
+    std::string     responseMessage;
+    std::string     errorCode;
+    struct timespec ts;
+    ts.tv_sec  = 0;        // Seconds
+    ts.tv_nsec = 1000000L; // Nanoseconds (1 millisecond)
+
+    cJSON *root = cJSON_Parse(aRequest.GetBody().c_str());
+
+    if (NULL == root)
+    {
+        ErrorHandler(aResponse, HttpStatusCode::kStatusBadRequest);
+        return;
+    }
+
+    // We need to perform general validation before we attempt to
+    // perform any task specific validation to ensure that
+    // we're working on tasks which follow at least the proper
+    // structure for a high level task.
+    cJSON *dataArray = cJSON_GetObjectItemCaseSensitive(root, "data");
+    // TODO-SPAR11
+    // VerifyOrExit((dataArray != NULL) || cJSON_IsArray(dataArray), error = OTBR_ERROR_NOT_FOUND);
+    if ((dataArray == NULL) || !cJSON_IsArray(dataArray))
+    {
+        ErrorHandler(aResponse, HttpStatusCode::kStatusConflict);
+        return;
+    }
+
+    // It is vital that we validate the form and arguments of
+    // all tasks before we attempt to perform processing on
+    // any of the tasks.
+    uint8_t task_validity[TASK_QUEUE_MAX];
+    uint8_t tasks_valid_count = 0;
+    for (int idx = 0; idx < cJSON_GetArraySize(dataArray); idx++)
+    {
+        task_validity[idx] = validate_task(cJSON_GetArrayItem(dataArray, idx));
+
+        if (ACTIONS_TASK_VALID == task_validity[idx])
+        {
+            tasks_valid_count++;
+        }
+        else
+        {
+            // Unimplemented tasks counted as failed / invalid tasks
+            /*
+             * According to siemens_rest_specification_2022-11-24.openapi.yaml
+             * Condition
+             * Requires all items in the list to be valid Task items with all required attributes;
+             * otherwise rejects whole list and returns 409 Conflict.
+             */
+            // otbrLogCrit("ACTION_TASK_INVALID");
+            ErrorHandler(aResponse, HttpStatusCode::kStatusConflict);
+            return;
+        }
+        nanosleep(&ts, NULL); // 1 millisecond delay
+    }
+
+    if ((TASK_QUEUE_MAX - task_queue_len) + can_remove_task_max() < tasks_valid_count)
+    {
+        // Queueing all valid tasks would exceed the max number of tasks we can have queue
+        // Then as the specs define in [UC-003] return 409
+        ErrorHandler(aResponse, HttpStatusCode::kStatusConflict);
+        return;
+    }
+
+    // the active task queue counting is a bit un-intuitive, but the number works out for now
+    uint8_t active_task_in_queue_before_queueing_count = task_queue_len - can_remove_task_max();
+
+    cJSON *resp_data  = cJSON_CreateArray();
+    int    meta_items = 0;
+    for (int i = 0; i < cJSON_GetArraySize(dataArray); i++)
+    {
+        cJSON *datum = cJSON_GetArrayItem(dataArray, i);
+        uuid_t task_id;
+        queue_task(datum, &task_id);
+        task_node_t *task_node = task_node_find_by_id(task_id);
+        switch (task_validity[i])
+        {
+        case ACTIONS_TASK_VALID:
+            // Do nothing as the task automatically gets a PENDING status
+            break;
+        case ACTIONS_TASK_NOT_IMPLEMENTED:
+            task_node->status = ACTIONS_TASK_STATUS_UNIMPLEMENTED;
+            break;
+        case ACTIONS_TASK_INVALID:
+        default:
+            task_node->status = ACTIONS_TASK_STATUS_FAILED;
+            break;
+        }
+        cJSON_AddItemToArray(resp_data, task_to_json(task_node));
+        meta_items++;
+        nanosleep(&ts, NULL); // 1 millisecond delay
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddItemToObject(resp, "data", resp_data);
+    cJSON_AddItemToObject(resp, "meta",
+                          jsonCreateTaskMetaCollection(active_task_in_queue_before_queueing_count, meta_items));
+
+    const char *resp_str = cJSON_PrintUnformatted(resp);
+    otbrLogWarning("Sending (%d):\n%s", strlen(resp_str), resp_str);
+
+    responseMessage = resp_str;
+    aResponse.SetBody(responseMessage);
+    errorCode = GetHttpStatus(HttpStatusCode::kStatusOk);
+    aResponse.SetResponsCode(errorCode);
+    aResponse.SetComplete();
+
+    free((void *)resp_str);
+    cJSON_Delete(resp);
+
+    // Clear the 'root' JSON object and release its memory (this should also delete 'data')
+    cJSON_Delete(root);
+    root = NULL;
 }
 
 } // namespace rest

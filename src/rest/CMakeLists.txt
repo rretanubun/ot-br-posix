@@ -26,6 +26,11 @@
 #  POSSIBILITY OF SUCH DAMAGE.
 #
 
+# TODO-SPAR11: Make this KConfig, maybe something like this
+# if(OTBR_REST_API_EXTENSIONS)
+add_subdirectory(extensions)
+# endif()
+
 add_library(otbr-rest
     rest_web_server.cpp
     connection.cpp
@@ -45,4 +50,5 @@ target_link_libraries(otbr-rest
         otbr-utils
         openthread-ftd
         openthread-posix
+        otbr-rest-extension
 )
