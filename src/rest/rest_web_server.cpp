@@ -49,6 +49,7 @@ static const uint32_t kMaxServeNum = 500;
 
 RestWebServer::RestWebServer(ControllerOpenThread &aNcp, const std::string &aRestListenAddress, int aRestListenPort)
     : mResource(Resource(&aNcp))
+    , mNcp(aNcp)
     , mListenFd(-1)
 {
     mAddress.sin6_family = AF_INET6;
@@ -74,6 +75,17 @@ RestWebServer::~RestWebServer(void)
 void RestWebServer::Init(void)
 {
     mResource.Init();
+
+    // Initialize the openthread instance
+    auto threadHelper = mNcp.GetThreadHelper();
+    mInstance         = threadHelper->GetInstance();
+    if (mInstance != NULL)
+    {
+        // Initialize the mutex and creates a thread to process the 'api/actions'
+        // Pass the openthread instance that can be used to call openthread apis.
+        rest_task_queue_task_init(mInstance);
+    }
+
     InitializeListenFd();
 }
 
